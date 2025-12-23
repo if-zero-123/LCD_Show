@@ -209,49 +209,6 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
-// UART1 初始化
-static void MX_UART1_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
-
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1;
-  PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
-  HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit); // 配置 USART1 外设时钟
-
-  __HAL_RCC_USART1_CLK_ENABLE(); // 打开 USART1 时钟
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 1000000; // 设置波特率
-  huart1.Init.WordLength = UART_WORDLENGTH_8B; // 数据位
-  huart1.Init.StopBits = UART_STOPBITS_1; // 停止位
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-
-  HAL_MultiProcessor_Init(&huart1, 0, UART_WAKEUPMETHOD_IDLELINE);
-  HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8);
-  HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8);
-  HAL_UARTEx_DisableFifoMode(&huart1);
-
-  GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_10;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD; // 复用开漏输出
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART1; // 复用功能
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct); // 初始化串口引脚 PA9 PA10
-
-  HAL_NVIC_SetPriority(USART1_IRQn, 0, 0); // 设置串口中断优先级
-  HAL_NVIC_EnableIRQ(USART1_IRQn);         // 打开串口中断
-
-  HAL_UART_Receive_IT(&huart1, uart_rx_buf1, 4800); // 使能接收中断，缓冲区为 buf1
-}
-
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
@@ -268,24 +225,47 @@ void Error_Handler(void)
   /* USER CODE END Error_Handler_Debug */
 }
 
-// 串口接收完成中断回调函数
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+// UART1 初始化（寄存器方式，8N1，波特率 1Mbps，中断接收）
+static void MX_UART1_Init(void)
 {
-  if (huart->Instance == USART1)
-  {
-    if (buf == 1) // 当前使用的是 buf1
-    {
-      buf = 2;  // 下次使用 buf2
-      disp = 1; // 告诉 main 显示 buf1 内容
-      HAL_UART_Receive_IT(&huart1, uart_rx_buf2, 4800); // 切换为 buf2
-    }
-    else
-    {
-      buf = 1;  // 下次使用 buf1
-      disp = 2; // 告诉 main 显示 buf2 内容
-      HAL_UART_Receive_IT(&huart1, uart_rx_buf1, 4800); // 切换为 buf1
-    }
-  }
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1;
+  PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
+  HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit); // 配置 USART1 外设时钟
+
+  __HAL_RCC_USART1_CLK_ENABLE(); // 打开 USART1 时钟
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  // PA9 / PA10 复用为 USART1_TX / USART1_RX
+  GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD; // 按题目要求使用复用开漏
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  // 计算并配置波特率寄存器 BRR
+  uint32_t pclk = HAL_RCC_GetPCLK2Freq();
+  USART1->BRR = pclk / 1000000U; // 1 Mbps
+
+  // 配置为 8N1，开启收发和接收中断
+  USART1->CR1 = 0; // 先清零
+  USART1->CR1 |= USART_CR1_TE | USART_CR1_RE;      // 发送、接收使能
+  USART1->CR1 |= USART_CR1_RXNEIE_RXFNEIE;         // 接收非空中断
+  USART1->CR1 |= USART_CR1_UE;                     // 使能 USART
+
+  // 初始化接收缓冲区状态
+  uart_rx_index = 0;
+  uart_rx_len   = 4800;
+  uart_rx_ptr   = uart_rx_buf1;
+  buf           = 1;
+  disp          = 0;
+
+  // 使能 NVIC 中断
+  HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(USART1_IRQn);
 }
 
 #ifdef  USE_FULL_ASSERT
